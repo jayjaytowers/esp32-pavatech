@@ -393,6 +393,96 @@ void setupWebServer() {
       background: #e8f5e9;
       color: #2e7d32;
     }
+    .controls {
+      margin-top: 30px;
+    }
+    .controls h2 {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 15px;
+      text-align: center;
+    }
+    .button-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .temp-button {
+      padding: 15px;
+      border: 2px solid #667eea;
+      border-radius: 10px;
+      background: white;
+      color: #667eea;
+      font-weight: bold;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    .temp-button:hover {
+      background: #f0f0f0;
+      transform: translateY(-2px);
+    }
+    .temp-button:active {
+      transform: translateY(0);
+    }
+    .temp-button.active {
+      background: #667eea;
+      color: white;
+    }
+    .temp-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .stop-button {
+      margin-top: 15px;
+      width: 100%;
+      padding: 15px;
+      border: none;
+      border-radius: 10px;
+      background: #c62828;
+      color: white;
+      font-weight: bold;
+      font-size: 16px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    .stop-button:hover {
+      background: #b71c1c;
+    }
+    .stop-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .about {
+      margin-top: 30px;
+      padding: 20px;
+      background: #f9f9f9;
+      border-radius: 10px;
+      border-left: 4px solid #667eea;
+    }
+    .about h3 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 15px;
+    }
+    .about ul {
+      list-style: none;
+      padding: 0;
+    }
+    .about li {
+      padding: 8px 0;
+      color: #666;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+    }
+    .about li:before {
+      content: "•";
+      color: #667eea;
+      font-weight: bold;
+      font-size: 20px;
+      margin-right: 10px;
+    }
   </style>
 </head>
 <body>
@@ -424,9 +514,36 @@ void setupWebServer() {
     </div>
     
     <div id="status" class="status idle">Esperando</div>
+
+    <div class="controls">
+      <h2>Control de Temperatura</h2>
+      <div class="button-grid">
+        <button class="temp-button" onclick="startHeating(70)" id="btn-te">Te (70&deg;C)</button>
+        <button class="temp-button" onclick="startHeating(90)" id="btn-cafe">Cafe (90&deg;C)</button>
+        <button class="temp-button" onclick="startHeating(80)" id="btn-mate">Mate (80&deg;C)</button>
+        <button class="temp-button" onclick="startHeating(100)" id="btn-hervir">Hervir (100&deg;C)</button>
+      </div>
+      <button class="stop-button" onclick="stopHeating()" id="btn-stop">Detener</button>
+    </div>
+
+    <div class="about">
+      <h3>Acerca de esta Pava</h3>
+      <ul>
+        <li>Control inteligente basado en ESP32</li>
+        <li>Sensor de temperatura DS18B20 de precision</li>
+        <li>Display TM1637 con hora sincronizada por NTP</li>
+        <li>4 temperaturas preestablecidas optimizadas</li>
+        <li>Control tactil con pulsador multifuncion</li>
+        <li>Interfaz web responsive para control remoto</li>
+        <li>Alertas sonoras con buzzer integrado</li>
+        <li>Animacion visual durante el calentamiento</li>
+      </ul>
+    </div>
   </div>
 
   <script>
+    let currentHeating = false;
+
     function updateData() {
       fetch('/data')
         .then(response => response.json())
@@ -434,6 +551,8 @@ void setupWebServer() {
           document.getElementById('temp').textContent = data.temp.toFixed(1);
           document.getElementById('mode').textContent = data.mode;
           document.getElementById('target').textContent = data.target + ' C';
+          
+          currentHeating = data.heating;
           
           const status = document.getElementById('status');
           if (data.heating) {
@@ -446,7 +565,38 @@ void setupWebServer() {
           
           const percent = (data.temp / 100) * 502;
           document.getElementById('gauge').setAttribute('stroke-dasharray', percent + ' 502');
+
+          updateButtons(data.heating, data.target);
         });
+    }
+
+    function updateButtons(heating, target) {
+      const buttons = document.querySelectorAll('.temp-button');
+      buttons.forEach(btn => {
+        btn.disabled = heating;
+        btn.classList.remove('active');
+      });
+
+      if (heating) {
+        if (target == 70) document.getElementById('btn-te').classList.add('active');
+        else if (target == 90) document.getElementById('btn-cafe').classList.add('active');
+        else if (target == 80) document.getElementById('btn-mate').classList.add('active');
+        else if (target == 100) document.getElementById('btn-hervir').classList.add('active');
+      }
+
+      document.getElementById('btn-stop').disabled = !heating;
+    }
+
+    function startHeating(temp) {
+      fetch('/start?temp=' + temp)
+        .then(() => updateData())
+        .catch(err => console.error('Error:', err));
+    }
+
+    function stopHeating() {
+      fetch('/stop')
+        .then(() => updateData())
+        .catch(err => console.error('Error:', err));
     }
     
     updateData();
@@ -467,5 +617,33 @@ void setupWebServer() {
     json += "\"heating\":" + String(isHeating ? "true" : "false");
     json += "}";
     request->send(200, "application/json", json);
+  });
+
+  // Endpoint para iniciar calentamiento
+  server.on("/start", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("temp")) {
+      int temp = request->getParam("temp")->value().toInt();
+      if (temp == 70 || temp == 80 || temp == 90 || temp == 100) {
+        targetTemp = temp;
+        isHeating = true;
+        digitalWrite(RELAY_PIN, HIGH);
+        animationStep = 0;
+        playBeep();
+        request->send(200, "text/plain", "OK");
+      } else {
+        request->send(400, "text/plain", "Invalid temperature");
+      }
+    } else {
+      request->send(400, "text/plain", "Missing temperature parameter");
+    }
+  });
+
+  // Endpoint para detener calentamiento
+  server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
+    isHeating = false;
+    digitalWrite(RELAY_PIN, LOW);
+    currentMode = MODE_CLOCK;
+    playBeep();
+    request->send(200, "text/plain", "OK");
   });
 }
