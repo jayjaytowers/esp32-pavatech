@@ -1,19 +1,11 @@
 #include <WiFi.h>
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
+#include <time.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <TM1637Display.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
 
-// Pines
-#define RELE        15
-#define SENSOR      13
-#define DISPLAY_CLK 22
-#define DISPLAY_DIO 23
-#define PULSADOR    12
-
-// Credenciales Wi-Fi Wokwi
+// Configuración WiFi
 #define WIFI_SSID "Wokwi-GUEST"
 #define WIFI_PASSWORD ""
 #define WIFI_CHANNEL 6 // Defining the WiFi channel speeds up the connection
@@ -25,222 +17,455 @@ const uint8_t SEG_HOLA [] = {
 	SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G    // A
 };
 
-// Configuración del sensor DS18B20
-OneWire oneWire (SENSOR);
-DallasTemperature sensors (&oneWire);
-
-// Configuración del display TM1637
-TM1637Display display (DISPLAY_CLK, DISPLAY_DIO);
-
 // Configuración NTP
-WiFiUDP ntpUDP;
-NTPClient timeClient (ntpUDP, "ar.pool.ntp.org", -10800, 60000); // UTC-3
+const char* ntpServer = "ar.pool.ntp.org";
+const long gmtOffset_sec = -10800; // GMT-3 para Argentina
+const int daylightOffset_sec = 0;
 
-// Configuración del servidor web
-WebServer server (80);
+// Pines
+#define BUTTON_PIN 12
+#define BUZZER_PIN 14
+#define RELAY_PIN 15
+#define DS18B20_PIN 13
+#define TM1637_CLK 22
+#define TM1637_DIO 23
 
-// Variables para el pulsador y modos
-bool displayMode = false; // false: temperatura, true: hora
-int lastButtonState = HIGH; // Estado inicial del pulsador (asumiendo pull-up)
+// Temperaturas preestablecidas
+enum TempMode {
+  MODE_CLOCK,
+  MODE_TE,      // 70°C
+  MODE_CAFE,    // 90°C
+  MODE_MATE,    // 80°C
+  MODE_HERVIR   // 100°C
+};
 
-// Página HTML embebida
-const char* htmlPage = R"rawliteral(
+const int TEMP_TE = 70;
+const int TEMP_CAFE = 90;
+const int TEMP_MATE = 80;
+const int TEMP_HERVIR = 100;
+
+// Variables globales
+TempMode currentMode = MODE_CLOCK;
+TempMode selectedMode = MODE_TE;
+bool isHeating = false;
+float currentTemp = 0.0;
+int targetTemp = 0;
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+bool longPressDetected = false;
+int animationStep = 0;
+unsigned long lastAnimationTime = 0;
+
+// Objetos
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature sensors(&oneWire);
+TM1637Display display(TM1637_CLK, TM1637_DIO);
+AsyncWebServer server(80);
+
+// Notas musicales
+#define NOTE_C5 523
+#define NOTE_D5 587
+#define NOTE_E5 659
+#define NOTE_G5 784
+#define NOTE_A5 880
+#define NOTE_C6 1047
+
+// Prototipos
+void playStartupMelody();
+void playBeep();
+void playCompleteMelody();
+void updateDisplay();
+void showAnimation();
+void handleButton();
+void setupWebServer();
+String getModeName(TempMode mode);
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configurar pines
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+  
+  // Inicializar display
+  display.setBrightness(7);
+  display.showNumberDec(0, false);
+  
+  // Inicializar sensor de temperatura
+  sensors.begin();
+  
+  // Conectar WiFi
+  WiFi.begin (WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
+  display.setSegments (SEG_HOLA); // Mostrar durante conexión
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("\nWiFi conectado");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+  
+  // Configurar NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  
+  // Configurar servidor web
+  setupWebServer();
+  server.begin();
+  
+  // Melodía de inicio
+  playStartupMelody();
+}
+
+void loop() {
+  handleButton();
+  
+  // Leer temperatura cada 500ms
+  static unsigned long lastTempRead = 0;
+  if (millis() - lastTempRead > 500) {
+    sensors.requestTemperatures();
+    currentTemp = sensors.getTempCByIndex(0);
+    lastTempRead = millis();
+  }
+  
+  // Control de calentamiento
+  if (isHeating) {
+    if (currentTemp >= targetTemp) {
+      digitalWrite(RELAY_PIN, LOW);
+      isHeating = false;
+      playCompleteMelody();
+      currentMode = MODE_CLOCK;
+    }
+    // Mostrar animación mientras calienta
+    if (millis() - lastAnimationTime > 300) {
+      showAnimation();
+      lastAnimationTime = millis();
+    }
+  } else {
+    // Actualizar display cada 200ms cuando no está calentando
+    static unsigned long lastDisplayUpdate = 0;
+    if (millis() - lastDisplayUpdate > 200) {
+      updateDisplay();
+      lastDisplayUpdate = millis();
+    }
+  }
+  
+  delay(10);
+}
+
+void handleButton() {
+  bool buttonState = digitalRead(BUTTON_PIN) == LOW;
+  
+  if (buttonState && !buttonPressed) {
+    // Botón presionado
+    buttonPressed = true;
+    buttonPressTime = millis();
+    longPressDetected = false;
+  }
+  
+  if (buttonPressed && buttonState) {
+    // Detectar pulsación larga (> 1 segundo)
+    if (!longPressDetected && (millis() - buttonPressTime > 1000)) {
+      longPressDetected = true;
+      // Pulsación larga: iniciar calentamiento
+      playBeep();
+      delay(100);
+      playBeep();
+      
+      switch(selectedMode) {
+        case MODE_TE: targetTemp = TEMP_TE; break;
+        case MODE_CAFE: targetTemp = TEMP_CAFE; break;
+        case MODE_MATE: targetTemp = TEMP_MATE; break;
+        case MODE_HERVIR: targetTemp = TEMP_HERVIR; break;
+        default: targetTemp = TEMP_HERVIR;
+      }
+      
+      isHeating = true;
+      digitalWrite(RELAY_PIN, HIGH);
+      animationStep = 0;
+    }
+  }
+  
+  if (!buttonState && buttonPressed) {
+    // Botón liberado
+    if (!longPressDetected) {
+      // Pulsación corta: cambiar modo
+      playBeep();
+      
+      if (currentMode == MODE_CLOCK) {
+        currentMode = MODE_TE;
+        selectedMode = MODE_TE;
+      } else {
+        switch(selectedMode) {
+          case MODE_TE: selectedMode = MODE_CAFE; break;
+          case MODE_CAFE: selectedMode = MODE_MATE; break;
+          case MODE_MATE: selectedMode = MODE_HERVIR; break;
+          case MODE_HERVIR: selectedMode = MODE_TE; break;
+        }
+        currentMode = selectedMode;
+      }
+    }
+    buttonPressed = false;
+  }
+}
+
+void updateDisplay() {
+  if (currentMode == MODE_CLOCK) {
+    // Mostrar hora
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      int displayTime = timeinfo.tm_hour * 100 + timeinfo.tm_min;
+      display.showNumberDecEx(displayTime, 0b01000000, true);
+    }
+  } else {
+    // Mostrar temperatura objetivo
+    int temp = 0;
+    switch(currentMode) {
+      case MODE_TE: temp = TEMP_TE; break;
+      case MODE_CAFE: temp = TEMP_CAFE; break;
+      case MODE_MATE: temp = TEMP_MATE; break;
+      case MODE_HERVIR: temp = TEMP_HERVIR; break;
+      default: temp = 0;
+    }
+    display.showNumberDec(temp, false);
+  }
+}
+
+void showAnimation() {
+  // Animación tipo "snake"
+  uint8_t segments[] = {0x00, 0x00, 0x00, 0x00};
+  
+  int pos = animationStep % 6;
+  int digit = pos / 2;
+  bool isTop = (pos % 2) == 0;
+  
+  if (isTop) {
+    segments[digit] = 0b00000001; // Segmento superior
+  } else {
+    segments[digit] = 0b00001000; // Segmento inferior
+  }
+  
+  display.setSegments(segments);
+  animationStep++;
+}
+
+void playStartupMelody() {
+  tone(BUZZER_PIN, NOTE_C5, 150);
+  delay(150);
+  tone(BUZZER_PIN, NOTE_E5, 150);
+  delay(150);
+  tone(BUZZER_PIN, NOTE_G5, 150);
+  delay(150);
+  tone(BUZZER_PIN, NOTE_C6, 300);
+  delay(300);
+  noTone(BUZZER_PIN);
+}
+
+void playBeep() {
+  tone(BUZZER_PIN, NOTE_A5, 100);
+  delay(100);
+  noTone(BUZZER_PIN);
+}
+
+void playCompleteMelody() {
+  tone(BUZZER_PIN, NOTE_G5, 200);
+  delay(200);
+  tone(BUZZER_PIN, NOTE_C6, 200);
+  delay(200);
+  tone(BUZZER_PIN, NOTE_E5, 200);
+  delay(200);
+  tone(BUZZER_PIN, NOTE_G5, 400);
+  delay(400);
+  noTone(BUZZER_PIN);
+}
+
+String getModeName(TempMode mode) {
+  switch(mode) {
+    case MODE_TE: return "Té";
+    case MODE_CAFE: return "Café";
+    case MODE_MATE: return "Mate";
+    case MODE_HERVIR: return "Hervir";
+    default: return "Reloj";
+  }
+}
+
+void setupWebServer() {
+  // Página principal
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    const char* html = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Control de Pava Eléctrica</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/justgage/1.4.0/justgage.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pava Electrica Inteligente</title>
   <style>
-    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-    button { padding: 15px 30px; margin: 10px; font-size: 18px; cursor: pointer; }
-    #gauge { width: 300px; height: 240px; margin: 20px auto; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      max-width: 500px;
+      width: 100%;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+      margin-bottom: 30px;
+      font-size: 28px;
+    }
+    .gauge-container {
+      position: relative;
+      width: 250px;
+      height: 250px;
+      margin: 30px auto;
+    }
+    svg { width: 100%; height: 100%; }
+    .gauge-bg { fill: none; stroke: #e0e0e0; stroke-width: 20; }
+    .gauge-fill { 
+      fill: none; 
+      stroke: #667eea; 
+      stroke-width: 20; 
+      stroke-linecap: round;
+      transition: stroke-dasharray 0.3s ease;
+    }
+    .temp-display {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+    }
+    .temp-value {
+      font-size: 48px;
+      font-weight: bold;
+      color: #333;
+    }
+    .temp-unit { font-size: 24px; color: #666; }
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-top: 30px;
+    }
+    .info-card {
+      background: #f5f5f5;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+    }
+    .info-label {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 5px;
+    }
+    .info-value {
+      font-size: 20px;
+      font-weight: bold;
+      color: #333;
+    }
+    .status {
+      margin-top: 20px;
+      padding: 15px;
+      border-radius: 10px;
+      text-align: center;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    .status.heating {
+      background: #ffebee;
+      color: #c62828;
+    }
+    .status.idle {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
   </style>
 </head>
 <body>
-  <h1>Control de Pava Eléctrica</h1>
-  <button id="controlButton" onclick="toggleCommand()">Cargando...</button>
-  <div id="gauge" data-value="0"></div>
+  <div class="container">
+    <h1>Pava Electrica</h1>
+    
+    <div class="gauge-container">
+      <svg viewBox="0 0 200 200">
+        <circle class="gauge-bg" cx="100" cy="100" r="80"/>
+        <circle id="gauge" class="gauge-fill" cx="100" cy="100" r="80"
+                transform="rotate(-90 100 100)"
+                stroke-dasharray="0 502"/>
+      </svg>
+      <div class="temp-display">
+        <div class="temp-value" id="temp">--</div>
+        <div class="temp-unit">&deg;C</div>
+      </div>
+    </div>
+    
+    <div class="info-grid">
+      <div class="info-card">
+        <div class="info-label">Modo</div>
+        <div class="info-value" id="mode">--</div>
+      </div>
+      <div class="info-card">
+        <div class="info-label">Objetivo</div>
+        <div class="info-value" id="target">--</div>
+      </div>
+    </div>
+    
+    <div id="status" class="status idle">Esperando</div>
+  </div>
 
   <script>
-    let gauge = new JustGage({
-      id: 'gauge',
-      value: 0,
-      min: 0,
-      max: 100,
-      title: 'Temperatura (°C)',
-      label: '°C',
-      gaugeWidthScale: 0.6,
-      counter: true,
-      decimals: 2,
-      gaugeColor: '#00ff00' // Verde por defecto (apagada)
-    });
-
-    // Actualizar estado inicial y texto del botón
-    function updateStatus() {
-      fetch('/status')
-        .then(response => response.text())
+    function updateData() {
+      fetch('/data')
+        .then(response => response.json())
         .then(data => {
-          const button = document.getElementById('controlButton');
-          button.innerText = (data === 'ENCENDIDA') ? 'Apagar' : 'Encender';
-          gauge.refresh(gauge._getValue(), null, null, {
-            gaugeColor: data === 'ENCENDIDA' ? '#ff0000' : '#00ff00' // Rojo si encendida, verde si apagada
-          });
+          document.getElementById('temp').textContent = data.temp.toFixed(1);
+          document.getElementById('mode').textContent = data.mode;
+          document.getElementById('target').textContent = data.target + ' C';
+          
+          const status = document.getElementById('status');
+          if (data.heating) {
+            status.textContent = 'Calentando...';
+            status.className = 'status heating';
+          } else {
+            status.textContent = 'Lista';
+            status.className = 'status idle';
+          }
+          
+          const percent = (data.temp / 100) * 502;
+          document.getElementById('gauge').setAttribute('stroke-dasharray', percent + ' 502');
         });
     }
-    updateStatus();
-
-    // Actualizar temperatura y estado cada 5 segundos
-    setInterval(() => {
-      fetch('/temperature')
-        .then(response => response.text())
-        .then(data => {
-          gauge.refresh(parseFloat(data));
-        });
-      updateStatus(); // Actualizar estado y color del gauge
-    }, 5000);
-
-    function toggleCommand() {
-      const button = document.getElementById('controlButton');
-      const command = button.innerText === 'Encender' ? 'ENCENDER' : 'APAGAR';
-      fetch('/control?command=' + command)
-        .then(response => response.text())
-        .then(data => {
-          button.innerText = (data === 'ENCENDIDA') ? 'Apagar' : 'Encender';
-          gauge.refresh(gauge._getValue(), null, null, {
-            gaugeColor: data === 'ENCENDIDA' ? '#ff0000' : '#00ff00'
-          });
-        });
-    }
+    
+    updateData();
+    setInterval(updateData, 1000);
   </script>
 </body>
 </html>
 )rawliteral";
-
-// Función para formatear y mostrar la temperatura
-void mostrarTemperatura (float temp) {
-  // Convertir la temperatura a entero (redondeo)
-  int tempInt = round(temp);
+    request->send(200, "text/html", html);
+  });
   
-  // Asegurarse de que la temperatura esté en el rango de 0 a 99
-  if (tempInt < 0) tempInt = 0;
-  if (tempInt > 99) tempInt = 99;
-
-  // Crear el array para el display (4 posiciones)
-  uint8_t data[] = {0, 0, 0, 0};
-
-  // Primeros dos dígitos: temperatura
-  data[0] = display.encodeDigit(tempInt / 10); // Decenas
-  data[1] = display.encodeDigit(tempInt % 10); // Unidades
-  
-  // Tercer dígito: símbolo °
-  data[2] = SEG_A | SEG_B | SEG_F | SEG_G; // °
-  
-  // Cuarto dígito: letra C
-  data[3] = SEG_A | SEG_D | SEG_E | SEG_F; // C
-
-  // Mostrar en el display
-  display.setSegments(data);
-}
-
-void setup() {
-  Serial.begin (115200);
-  pinMode (RELE, OUTPUT);
-  digitalWrite (RELE, LOW); // Pava apagada inicialmente
-  pinMode (PULSADOR, INPUT_PULLUP);
-  sensors.begin(); // Iniciar el sensor DS18B20
-  display.setBrightness (0x0f); // Configurar brillo máximo del TM1637
-  display.setSegments (SEG_HOLA);
-
-  // Conectar a WiFi
-  WiFi.begin (WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay (1000);
-    Serial.println ("Conectando a WiFi...");
-  }
-  Serial.println ("Conectado a WiFi: " + WiFi.localIP().toString());
-
-  // Iniciar NTP
-  timeClient.begin ();
-  timeClient.update ();
-
-  // Configurar rutas del servidor web
-  server.on ("/", []() {
-    server.sendHeader("Content-Type", "text/html; charset=UTF-8");
-    server.send(200, "text/html", htmlPage);
+  // API endpoint para datos
+  server.on("/data", HTTP_GET, [](AsyncWebServerRequest *request){
+    String json = "{";
+    json += "\"temp\":" + String(currentTemp) + ",";
+    json += "\"mode\":\"" + getModeName(currentMode) + "\",";
+    json += "\"target\":" + String(targetTemp) + ",";
+    json += "\"heating\":" + String(isHeating ? "true" : "false");
+    json += "}";
+    request->send(200, "application/json", json);
   });
-  server.on ("/temperature", []() {
-    sensors.requestTemperatures();
-    float temperature = sensors.getTempCByIndex(0);
-    if (temperature != DEVICE_DISCONNECTED_C) {
-      char tempStr[8];
-      dtostrf(temperature, 6, 2, tempStr);
-      server.send(200, "text/plain", tempStr);
-    } else {
-      server.send(500, "text/plain", "Error sensor");
-    }
-  });
-  server.on ("/control", []() {
-    String command = server.arg("command");
-    if (command == "ENCENDER") {
-      digitalWrite (RELE, HIGH);
-      server.send (200, "text/plain", "ENCENDIDA");
-    } else if (command == "APAGAR") {
-      digitalWrite(RELE, LOW);
-      server.send(200, "text/plain", "APAGADA");
-    } else {
-      server.send(400, "text/plain", "Comando inválido");
-    }
-  });
-  server.on ("/status", []() {
-    server.send(200, "text/plain", digitalRead(RELE) ? "ENCENDIDA" : "APAGADA");
-  });
-  server.begin ();
-  Serial.println ("Servidor web iniciado.");
-}
-
-void loop() {
-  server.handleClient();
-
-  // Leer el estado del pulsador
-  int buttonState = digitalRead (PULSADOR);
-  if (buttonState == LOW && lastButtonState == HIGH) {
-    displayMode = !displayMode; // Alternar modo
-    delay (50); // Debounce simple
-  }
-  lastButtonState = buttonState;
-
-  // Actualizar display cada segundo (para hora precisa)
-  static unsigned long lastUpdate = 0;
-  if (millis () - lastUpdate >= 1000) {
-    timeClient.update (); // Actualizar hora NTP
-
-    if (displayMode) {
-      // Mostrar hora (HH:MM)
-      int hour = timeClient.getHours();
-      int minute = timeClient.getMinutes();
-      display.showNumberDecEx(hour * 100 + minute, 0x40, true); // Mostrar con dos puntos
-      Serial.println("Hora: " + String(hour) + ":" + String(minute));
-    } else {
-      // Mostrar temperatura (parte entera + °C)
-      sensors.requestTemperatures();
-      float temperature = sensors.getTempCByIndex(0);
-      if (temperature != DEVICE_DISCONNECTED_C) {
-        int tempInt = (int)temperature; // Tomar solo la parte entera
-        uint8_t data[] = {
-          display.encodeDigit(tempInt / 10), // Decenas
-          display.encodeDigit(tempInt % 10), // Unidades
-          SEG_A | SEG_B | SEG_F | SEG_G,     // Símbolo de grados
-          SEG_A | SEG_D | SEG_E | SEG_F      // Letra "C"
-        };
-        display.setSegments(data); // Mostrar "XX°C"
-        Serial.println("Temperatura: " + String(temperature) + " °C");
-      } else {
-        display.showNumberDec(0); // Mostrar 0 si hay error
-        Serial.println("Error al leer el sensor DS18B20");
-      }
-    }
-    lastUpdate = millis();
-  }
 }
