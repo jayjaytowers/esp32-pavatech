@@ -1,9 +1,9 @@
 # Pavatech
 
 Proyecto de control eléctronico de una pava eléctrica, para la materia Proyecto y Diseño electrónico de 7° año, del Instituto Don Orione (ciclo lectivo 2025).
-![alt text](image.png)
+![Esquematico](image.png)
 Utiliza un ESP32, un sensor de temperatura DS18B20, un display de 4 digitos (basado en TM1637), un buzzer para notificación sonora, y un relé para activar la resistencia de calentemiento. También incluye una interfaz web sencilla que muestra la temperatura y el estado de la pava, en tiempo real.
-![alt text](image-1.png)
+![Interfaz web](image-2.png)
 
 ## Compilación
 
