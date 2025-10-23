@@ -32,27 +32,27 @@ const int daylightOffset_sec = 0;
 
 // Temperaturas preestablecidas
 enum TempMode {
-  MODE_CLOCK,
-  MODE_TE,      // 70°C
-  MODE_CAFE,    // 90°C
-  MODE_MATE,    // 80°C
-  MODE_HERVIR   // 100°C
+  MODO_RELOJ,
+  MODO_TE,      // 70°C
+  MODO_CAFE,    // 90°C
+  MODO_MATE,    // 80°C
+  MODO_HERVIR   // 100°C
 };
 
 const int TEMP_TE = 70;
-const int TEMP_CAFE = 90;
 const int TEMP_MATE = 80;
+const int TEMP_CAFE = 90;
 const int TEMP_HERVIR = 100;
 
 // Variables globales
-TempMode currentMode = MODE_CLOCK;
-TempMode selectedMode = MODE_TE;
-bool isHeating = false;
-float currentTemp = 0.0;
-int targetTemp = 0;
+TempMode modoActual = MODO_RELOJ;
+TempMode modoElegido = MODO_TE;
+bool calentando = false;
+float tempActual = 0.0;
+int tempObjetivo = 0;
 unsigned long buttonPressTime = 0;
-bool buttonPressed = false;
-bool longPressDetected = false;
+bool botonPresionado = false;
+bool pulsacionLarga = false;
 int animationStep = 0;
 unsigned long lastAnimationTime = 0;
 
@@ -127,17 +127,17 @@ void loop() {
   static unsigned long lastTempRead = 0;
   if (millis() - lastTempRead > 500) {
     sensors.requestTemperatures();
-    currentTemp = sensors.getTempCByIndex(0);
+    tempActual = sensors.getTempCByIndex(0);
     lastTempRead = millis();
   }
   
   // Control de calentamiento
-  if (isHeating) {
-    if (currentTemp >= targetTemp) {
+  if (calentando) {
+    if (tempActual >= tempObjetivo) {
       digitalWrite(RELAY_PIN, LOW);
-      isHeating = false;
+      calentando = false;
       playCompleteMelody();
-      currentMode = MODE_CLOCK;
+      modoActual = MODO_RELOJ;
     }
     // Mostrar animación mientras calienta
     if (millis() - lastAnimationTime > 300) {
@@ -159,61 +159,61 @@ void loop() {
 void handleButton() {
   bool buttonState = digitalRead(BUTTON_PIN) == LOW;
   
-  if (buttonState && !buttonPressed) {
+  if (buttonState && !botonPresionado) {
     // Botón presionado
-    buttonPressed = true;
+    botonPresionado = true;
     buttonPressTime = millis();
-    longPressDetected = false;
+    pulsacionLarga = false;
   }
   
-  if (buttonPressed && buttonState) {
+  if (botonPresionado && buttonState) {
     // Detectar pulsación larga (> 1 segundo)
-    if (!longPressDetected && (millis() - buttonPressTime > 1000)) {
-      longPressDetected = true;
+    if (!pulsacionLarga && (millis() - buttonPressTime > 1000)) {
+      pulsacionLarga = true;
       // Pulsación larga: iniciar calentamiento
       playBeep();
       delay(100);
       playBeep();
       
-      switch(selectedMode) {
-        case MODE_TE: targetTemp = TEMP_TE; break;
-        case MODE_CAFE: targetTemp = TEMP_CAFE; break;
-        case MODE_MATE: targetTemp = TEMP_MATE; break;
-        case MODE_HERVIR: targetTemp = TEMP_HERVIR; break;
-        default: targetTemp = TEMP_HERVIR;
+      switch(modoElegido) {
+        case MODO_TE: tempObjetivo = TEMP_TE; break;
+        case MODO_CAFE: tempObjetivo = TEMP_CAFE; break;
+        case MODO_MATE: tempObjetivo = TEMP_MATE; break;
+        case MODO_HERVIR: tempObjetivo = TEMP_HERVIR; break;
+        default: tempObjetivo = TEMP_HERVIR;
       }
       
-      isHeating = true;
+      calentando = true;
       digitalWrite(RELAY_PIN, HIGH);
       animationStep = 0;
     }
   }
   
-  if (!buttonState && buttonPressed) {
+  if (!buttonState && botonPresionado) {
     // Botón liberado
-    if (!longPressDetected) {
+    if (!pulsacionLarga) {
       // Pulsación corta: cambiar modo
       playBeep();
       
-      if (currentMode == MODE_CLOCK) {
-        currentMode = MODE_TE;
-        selectedMode = MODE_TE;
+      if (modoActual == MODO_RELOJ) {
+        modoActual = MODO_TE;
+        modoElegido = MODO_TE;
       } else {
-        switch(selectedMode) {
-          case MODE_TE: selectedMode = MODE_CAFE; break;
-          case MODE_CAFE: selectedMode = MODE_MATE; break;
-          case MODE_MATE: selectedMode = MODE_HERVIR; break;
-          case MODE_HERVIR: selectedMode = MODE_TE; break;
+        switch(modoElegido) {
+          case MODO_TE: modoElegido = MODO_MATE; break;
+          case MODO_MATE: modoElegido = MODO_CAFE; break;
+          case MODO_CAFE: modoElegido = MODO_HERVIR; break;
+          case MODO_HERVIR: modoElegido = MODO_TE; break;
         }
-        currentMode = selectedMode;
+        modoActual = modoElegido;
       }
     }
-    buttonPressed = false;
+    botonPresionado = false;
   }
 }
 
 void updateDisplay() {
-  if (currentMode == MODE_CLOCK) {
+  if (modoActual == MODO_RELOJ) {
     // Mostrar hora
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
@@ -223,11 +223,11 @@ void updateDisplay() {
   } else {
     // Mostrar temperatura objetivo
     int temp = 0;
-    switch(currentMode) {
-      case MODE_TE: temp = TEMP_TE; break;
-      case MODE_CAFE: temp = TEMP_CAFE; break;
-      case MODE_MATE: temp = TEMP_MATE; break;
-      case MODE_HERVIR: temp = TEMP_HERVIR; break;
+    switch(modoActual) {
+      case MODO_TE: temp = TEMP_TE; break;
+      case MODO_CAFE: temp = TEMP_CAFE; break;
+      case MODO_MATE: temp = TEMP_MATE; break;
+      case MODO_HERVIR: temp = TEMP_HERVIR; break;
       default: temp = 0;
     }
     display.showNumberDec(temp, false);
@@ -284,10 +284,10 @@ void playCompleteMelody() {
 
 String getModeName(TempMode mode) {
   switch(mode) {
-    case MODE_TE: return "Té";
-    case MODE_CAFE: return "Café";
-    case MODE_MATE: return "Mate";
-    case MODE_HERVIR: return "Hervir";
+    case MODO_TE: return "Té";
+    case MODO_CAFE: return "Café";
+    case MODO_MATE: return "Mate";
+    case MODO_HERVIR: return "Hervir";
     default: return "Reloj";
   }
 }
@@ -487,7 +487,7 @@ void setupWebServer() {
 </head>
 <body>
   <div class="container">
-    <h1>Pava Electrica</h1>
+    <h1>PavaTech v2</h1>
     
     <div class="gauge-container">
       <svg viewBox="0 0 200 200">
@@ -519,24 +519,19 @@ void setupWebServer() {
       <h2>Control de Temperatura</h2>
       <div class="button-grid">
         <button class="temp-button" onclick="startHeating(70)" id="btn-te">Te (70&deg;C)</button>
-        <button class="temp-button" onclick="startHeating(90)" id="btn-cafe">Cafe (90&deg;C)</button>
         <button class="temp-button" onclick="startHeating(80)" id="btn-mate">Mate (80&deg;C)</button>
+        <button class="temp-button" onclick="startHeating(90)" id="btn-cafe">Cafe (90&deg;C)</button>
         <button class="temp-button" onclick="startHeating(100)" id="btn-hervir">Hervir (100&deg;C)</button>
       </div>
       <button class="stop-button" onclick="stopHeating()" id="btn-stop">Detener</button>
     </div>
 
     <div class="about">
-      <h3>Acerca de esta Pava</h3>
+      <h3>Integrantes:</h3>
       <ul>
-        <li>Control inteligente basado en ESP32</li>
-        <li>Sensor de temperatura DS18B20 de precision</li>
-        <li>Display TM1637 con hora sincronizada por NTP</li>
-        <li>4 temperaturas preestablecidas optimizadas</li>
-        <li>Control tactil con pulsador multifuncion</li>
-        <li>Interfaz web responsive para control remoto</li>
-        <li>Alertas sonoras con buzzer integrado</li>
-        <li>Animacion visual durante el calentamiento</li>
+        <li>Valentin Rimasa</li>
+        <li>Martin Skef</li>
+        <li>Juan Quiroga</li>
       </ul>
     </div>
   </div>
@@ -611,10 +606,10 @@ void setupWebServer() {
   // API endpoint para datos
   server.on("/data", HTTP_GET, [](AsyncWebServerRequest *request){
     String json = "{";
-    json += "\"temp\":" + String(currentTemp) + ",";
-    json += "\"mode\":\"" + getModeName(currentMode) + "\",";
-    json += "\"target\":" + String(targetTemp) + ",";
-    json += "\"heating\":" + String(isHeating ? "true" : "false");
+    json += "\"temp\":" + String(tempActual) + ",";
+    json += "\"mode\":\"" + getModeName(modoActual) + "\",";
+    json += "\"target\":" + String(tempObjetivo) + ",";
+    json += "\"heating\":" + String(calentando ? "true" : "false");
     json += "}";
     request->send(200, "application/json", json);
   });
@@ -624,8 +619,8 @@ void setupWebServer() {
     if (request->hasParam("temp")) {
       int temp = request->getParam("temp")->value().toInt();
       if (temp == 70 || temp == 80 || temp == 90 || temp == 100) {
-        targetTemp = temp;
-        isHeating = true;
+        tempObjetivo = temp;
+        calentando = true;
         digitalWrite(RELAY_PIN, HIGH);
         animationStep = 0;
         playBeep();
@@ -640,9 +635,9 @@ void setupWebServer() {
 
   // Endpoint para detener calentamiento
   server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
-    isHeating = false;
+    calentando = false;
     digitalWrite(RELAY_PIN, LOW);
-    currentMode = MODE_CLOCK;
+    modoActual = MODO_RELOJ;
     playBeep();
     request->send(200, "text/plain", "OK");
   });
